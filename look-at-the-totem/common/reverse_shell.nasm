@@ -1,3 +1,4 @@
+;; Almost entirely plagiarized from https://www.exploit-db.com/exploits/47025
 bits 64
 section .text
 
