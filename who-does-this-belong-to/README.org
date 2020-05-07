@@ -1,0 +1,18 @@
+#+TITLE: Who Does This Belong To (250pts)
+
+This challenge consisted of two parts: getting a shell via a simple
+command-injection vulnerability in =diusweb= (straightforward), and
+escalating privileges on the host via the =dius= compression utility
+(PITA). Brian Welch posted a great writeup [[https://github.com/welchbj/ctf/tree/master/writeups/2020/CyberStakes/who-does-this-belong-to][here]].
+
+- =libw.c=: Tiny C file to make a shared library with a constructor
+  function that reads and prints the flag (this will be loaded by the
+  =dius= binary while it is running set-uid =root=)
+- =race.c=: Exploit race condition in =dius= to cause it to extract
+  =libw.so= to =/challenge/www/c=
+- =win.py=: Script to upload =libw.so= and =race= to target, when run the
+  sequence of commands to get the flag
+
+#+begin_src sh
+$ python win.py <challenge host> <challenge port>
+#+end_src

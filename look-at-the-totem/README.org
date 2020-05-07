@@ -1,0 +1,378 @@
+#+TITLE: Look at the Totem (500pts)
+
+TL;DR: you can build the [[Dockerfile]] in this directory to recreate my
+environment, and test out the exploit scripts. Be patient with the
+build, Buildroot downloads/compiles half the internet.
+
+#+begin_src sh
+$ docker build -t totem .
+$ docker run -it --rm --name totem-run totem
+$ cd /src/part1 && ./runvm.sh
+# a bunch of stuff goes by here
+
+# in another terminal window
+$ docker exec -it totem-run nc -lvvvvp 4444
+
+# in yet another terminal window
+$ docker exec -it -w /src/part1 totem-run ./runexploit.sh
+#+end_src
+
+* Description and Hints
+
+#+begin_quote
+What's at the top of the Totem? Let's grab our climbing gear and find
+out. Building this monolith takes a bit of time. Please allow a minute
+for everything to boot.
+#+end_quote
+
+To start, we're given a statically-linked =qemu-system-arm= binary,
+based on QEMU 2.11
+
+#+begin_src text
+$ ./qemu-system-arm -version
+QEMU emulator version 2.11.0 (v2.11.0-dirty)
+Copyright (c) 2003-2017 Fabrice Bellard and the QEMU Project developers
+#+end_src
+
+Hints:
+- QEMU escapes have a lot of [[http://www.phrack.org/papers/vm-escape-qemu-case-study.html][research]] [[https://vishnudevtj.github.io/notes/qemu-vm-escape-cve-2019-14378][online]]
+- QEMU is not running within KVM.
+
+* Patched  =qemu-system-arm= escape
+** Orientation
+
+When we start the challenge, we're given =root= SSH credentials for a
+specified server, and the hostname of a second server, without
+credentials. Logging into the first server, we find a single file in
+=root='s home directory: =tpmutil=. Poking around a bit more, we see that
+the system is running a pretty minimal [[https://buildroot.org/][Buildroot]] Linux image,
+(probably) running on the provided =qemu-system-arm= emulator
+
+#+begin_src text
+$ ssh -p <challenge port> root@<challenge host1>
+# pwd
+/root
+# ls
+tpmutil
+# uname -a
+Linux buildroot 4.19.16 #1 Mon Nov 25 01:50:50 EST 2019 armv5tejl GNU/Linux
+# cat /proc/cpuinfo
+processor       : 0
+model name      : ARM926EJ-S rev 5 (v5l)
+BogoMIPS        : 740.96
+Features        : swp half thumb fastmult edsp java
+CPU implementer : 0x41
+CPU architecture: 5TEJ
+CPU variant     : 0x0
+CPU part        : 0x926
+CPU revision    : 5
+
+Hardware        : ARM-Versatile (Device Tree Support)
+Revision        : 0000
+Serial          : 0000000000000000
+# cat /etc/os-release
+NAME=Buildroot
+VERSION=2019.02.7
+ID=buildroot
+VERSION_ID=2019.02.7
+PRETTY_NAME="Buildroot 2019.02.7"
+# ./tpmutil -h
+Super TPM Utility - version 0.2.9
+
+  Welcome to the most advanced password manager on the market. Super TPM Utility
+  ensures your passwords are not vulnerable to theft by storing them in the
+  CPU's Trusted Platform Module (TPM). With our proprietary TPM support, no
+  other password manager even comes close!
+
+Usage:
+  tpmutil add password
+    - Stores a new password in the TPM
+  tpmutil delete tag
+    - Removes the password associated with the specified tag
+  tpmutil edit tag new_password
+    - Modifies the password associated with the specified tag
+  tpmutil get tag
+    - Prints out the password associated with the specified tag
+  tpmutil search tag_suffix
+    - Lists any tags that match the 4 character suffix
+#+end_src
+
+To begin, I =scp='d the =tpmutil= binary to my local machine, and followed
+the guide [[http://people.redhat.com/~thuth/blog/general/2019/01/28/buildroot.html][here]] to make a small ARM Linux image I could run with the
+target =qemu-system-arm= binary. I added SSH (=dropbear=) to the image to
+quickly deploy/run exploit code. See the [[Dockerfile]] in this
+directory.
+
+** TPM Implementation/Vulnerabilities
+
+Looking at =tpmutil= in Ghidra, we immediately see some unrecognized
+instructions in the disassembly listing (interestingly, the decompiler
+recognizes this as =coprocessor_moveto=).
+
+[[./img/tpm_listing.png]]
+
+The [[https://web.eecs.umich.edu/~prabal/teaching/eecs373-f11/readings/ARMv7-M_ARM.pdf][ARM processor manual]] shows us this is an =MCR2= instruction:
+
+[[./img/mcr2.png]]
+
+I wrote a [[./part1/decode_mcr.py][script]] to decode these instructions:
+
+#+begin_src text
+add   : {'opc1': 0, 'CRn': 2, 'Rt': 1, 'coproc': 4, 'opc2': 0, 'CRm': 0}
+delete: {'opc1': 0, 'CRn': 0, 'Rt': 0, 'coproc': 4, 'opc2': 1, 'CRm': 8}
+edit  : {'opc1': 0, 'CRn': 2, 'Rt': 1, 'coproc': 4, 'opc2': 3, 'CRm': 8}
+get   : {'opc1': 0, 'CRn': 2, 'Rt': 1, 'coproc': 4, 'opc2': 2, 'CRm': 8}
+search: {'opc1': 0, 'CRn': 1, 'Rt': 2, 'coproc': 4, 'opc2': 4, 'CRm': 2}
+#+end_src
+
+So the TPM appears to the guest as a "coprocessor". The
+=qemu-system-arm= binary has the following symbols related to the TPM:
+
+#+begin_src text
+$ readelf -s qemu-system-arm | grep super_tpm
+  9771: 000000000058d68b   158 FUNC    LOCAL  DEFAULT    6 gen_helper_super_tpm_add
+  9772: 000000000058d729   138 FUNC    LOCAL  DEFAULT    6 gen_helper_super_tpm_del
+  9773: 000000000058d7b3   178 FUNC    LOCAL  DEFAULT    6 gen_helper_super_tpm_get
+  9774: 000000000058d865   178 FUNC    LOCAL  DEFAULT    6 gen_helper_super_tpm_edit
+  9775: 000000000058d917   178 FUNC    LOCAL  DEFAULT    6 gen_helper_super_tpm_sear
+ 40202: 00000000005a602d   573 FUNC    GLOBAL DEFAULT    6 disas_arm_super_tpm
+ 43086: 00000000005b5c5a   579 FUNC    GLOBAL DEFAULT    6 helper_super_tpm_add
+ 44145: 00000000005b6084   626 FUNC    GLOBAL DEFAULT    6 helper_super_tpm_get
+ 45919: 00000000005b64d3   516 FUNC    GLOBAL DEFAULT    6 helper_super_tpm_search
+ 49727: 00000000005b5ed9   427 FUNC    GLOBAL DEFAULT    6 helper_super_tpm_del
+ 53616: 00000000005b62f6   477 FUNC    GLOBAL DEFAULT    6 helper_super_tpm_edit
+#+end_src
+
+Investigating these functions, we see the hook for the TPM
+implementation is in QEMU's TCG (tiny code generator) translation
+code, which is invoked when QEMU is translating new basic blocks from
+ARM code into TCG intermediate representation, to ultimately be JIT'd
+and run on the host x86 processor. [[https://www.csd.uoc.gr/~hy428/reading/qemu-internals-slides-may6-2014.pdf][These]] slides serve as a pretty good
+overview of QEMU's architecture, and [[https://git.qemu.org/?p=qemu.git;a=blob_plain;f=tcg/README;hb=HEAD][this]] document explains TCG in
+some more detail.
+
+=disas_arm_super_tpm= handles each =MCR2= instruction by inspecting its
+parameters (which indicate whether this is an "add", "update", etc)
+and emitting a call to a "helper" function in the translated block.
+[[https://fulcronz27.wordpress.com/2014/06/09/qemu-call-a-custom-function-from-tcg/#pattern][This]] blog describes the TCG "helper function" facility pretty well.
+
+The =helper_super_tpm_get= function provides an arbitrary read of host
+memory to the guest, via a stack overflow vulnerability. It takes the
+value of the =CRm= parameter from the =MCR2= instruction as the number of
+bytes to copy from the "tag" buffer, and seemingly expects a maximum
+=CRm= value of 8. By providing a larger =CRm= value, we can overflow into
+an indexing parameter used to indicate a matching =TPMEntry= for the
+requested tag. Here's my annotated decompilation from Ghidra:
+
+[[./img/tpm_get.png]]
+
+The =helper_super_tpm_edit=  function has a similar arbitrary write vulnerability.
+
+** Exploit
+
+To break out of the ARM VM, we can upload a [[./part1/exploit.c][C program]] with the
+appropriate =MCR2= instructions to trigger the arbitrary read/write
+vulnerabilities.
+
+Using the R/W primitives, we employ the technique from [[https://vishnudevtj.github.io/notes/qemu-vm-escape-cve-2019-14378#orgf2b8ad3][one of the
+referenced articles]] to get code execution in the host. We install a
+fake =QEMUTimerList= with an entry that corresponds to an "expired"
+timer, with a callback function of our choosing. The callback will be
+invoked with an "=opaque=" pointer argument that we also provide in the
+=QEMUTimer= struct. This gives us an arbitrary call primitive /in the
+host QEMU process/.
+
+I use the arbitrary call primitive twice: first to make the TPM entry
+buffer executable (via the convenient =qemu_mprotect_rwx= function),
+then again to transfer execution to some shellcode. Because
+=qemu_mprotect_rwx= takes /two/ arguments, I used the =qemu_set_irq=
+function as my callback in the =QEMUTimer=, which invokes a specified
+function with multiple controlled arguments. I got that technique from
+[[https://dangokyo.me/2018/03/19/qemu-escape-part-6-put-everything-together-another-trial/][this]] writeup.
+
+While reversing I found it helpful to have a debug build of the legit
+=qemu-system-arm= v2.11 available for comparison to the challenge
+binary. It helped determine structure offsets when annotating the
+binary in Ghidra and recreating structs in my exploit. E.g. to get the
+offset of the =handler= member of the =IRQState= struct:
+
+#+begin_src text
+$ cd /src/part1/qemu-debug-build/arm-softmmu
+$ gdb ./qemu-system-arm
+(gdb) p &((struct IRQState*)0)->handler
+$1 = (qemu_irq_handler *) 0x28
+#+end_src
+
+[[./part1/reverse_shell.nasm][My shellcode]] gave me a shell on the host.
+
+** Post-exploit
+When we get our reverse shell, we see we're running as a user named
+=arm=, and there's a file named =pass= in the current directory
+(=/challenge/arm=) that gives us the creds to the second VM in the
+challenge. =ps= shows us the command the second VM is being run with,
+and also that it is running as =root=. We have access to that qemu
+binary as well; I threw the exploit again and used a little [[./part1/fetch_qemu_binary.py][receiver
+script]] to catch the reverse shell and write the binary to a local
+file.
+
+Here's a log of my poking around on the challenge server. I've added =$=
+"prompts" to distinguish commands I've entered from their output
+
+#+begin_src text
+[drewbarbs@localhost] $ nc -lvvvvp 35235
+Listening on [0.0.0.0] (family 2, port 35235)
+Connection from <challenge host> 35770 received!
+$ id
+uid=1000(arm) gid=1000(arm) groups=1000(arm)
+$ ls
+arm.sh
+efi-rtl8139.rom
+pass
+qemu-system-arm
+qemu-system-x86_64
+rootfs.ext2
+versatile-pb.dtb
+zImage
+$ pwd
+/challenge/arm
+$ ls /challenge
+arm
+run.sh
+x86
+$ ls /challenge/x86
+ls: cannot open directory '/challenge/x86': Permission denied
+$ cat /challenge/run.sh
+#!/bin/bash
+su -c "nohup /challenge/arm/arm.sh > /dev/null 2>&1" arm &
+/challenge/x86/x86.sh > /dev/null 2>&1
+$ ps -Aef
+UID        PID  PPID  C STIME TTY          TIME CMD
+root         1     0  0 18:15 ?        00:00:00 /bin/bash /challenge/run.sh
+root         6     1  0 18:15 ?        00:00:00 su -c nohup /challenge/arm/arm.sh > /dev/null 2>&1 arm
+root         7     1  0 18:15 ?        00:00:00 /bin/bash /challenge/x86/x86.sh
+root         9     7  4 18:15 ?        00:00:08 ./qemu-system-x86_64 -L . -kernel bzImage -drive file=rootfs.ext2,format=raw -append root=/dev/sda -serial none -monitor none -display none -net nic,model=rtl8139 -net nic -net user,hostfwd=tcp::5556-:22 -no-reboot -device pwn
+arm         11     6  0 18:15 ?        00:00:00 bash -c nohup /challenge/arm/arm.sh > /dev/null 2>&1
+arm         12    11  0 18:15 ?        00:00:00 /bin/bash /challenge/arm/arm.sh
+arm         14    12 62 18:15 ?        00:01:58 [sh]
+arm         32    14  0 18:18 ?        00:00:00 ps -Aef
+$ cat pass
+<creds to second VM>
+#+end_src
+
+* Patched =qemu-system-x86_64=
+
+** Orientation
+Using the credentials obtained above, we SSH into the second VM and
+find pretty much nothing in it other than another minimal buildroot
+filesystem. This time, =root='s home directory is empty (no obvious
+starting point like =tpmutil=).
+
+Looking at the command line for =qemu-system-x86_64= on the challenge
+host, we notice the =-device pwn= option. Sure enough, there are some
+corresponding symbols in the =qemu-system-x86_64= binary (again based on
+QEMU v2.11.0):
+
+#+begin_src text
+$ ./qemu-system-x86_64 -version
+QEMU emulator version 2.11.0 (v2.11.0-dirty)
+Copyright (c) 2003-2017 Fabrice Bellard and the QEMU Project developers
+$ readelf -s qemu-system-x86_64 | grep pwn_
+  9289: 00000000005cabd0    12 FUNC    LOCAL  DEFAULT    6 pci_pwn_register_types
+  9290: 00000000010ae420   104 OBJECT  LOCAL  DEFAULT   19 pwn_info.27884
+  9291: 00000000005cabe0    94 FUNC    LOCAL  DEFAULT    6 pwn_class_init
+  9293: 00000000005cb010   216 FUNC    LOCAL  DEFAULT    6 pci_pwn_realize
+  9294: 00000000005cac40   367 FUNC    LOCAL  DEFAULT    6 pwn_mmio_read
+  9295: 00000000005cadb0   265 FUNC    LOCAL  DEFAULT    6 pwn_mmio_write
+  9296: 00000000005caec0    17 FUNC    LOCAL  DEFAULT    6 pwn_obj_uint64
+  9297: 00000000005caee0    43 FUNC    LOCAL  DEFAULT    6 pwn_raise_irq.part.1
+  9298: 00000000005caf10   249 FUNC    LOCAL  DEFAULT    6 pwn_fact_thread
+  9299: 00000000005cb1e0   352 FUNC    LOCAL  DEFAULT    6 pwn_dma_timer
+  9300: 00000000010ae4a0   136 OBJECT  LOCAL  DEFAULT   19 pwn_mmio_ops
+  9301: 00000000005cb0f0   167 FUNC    LOCAL  DEFAULT    6 pwn_instance_init
+  9303: 00000000005cb1a0    63 FUNC    LOCAL  DEFAULT    6 pwn_check_range.constprop
+  9304: 000000000040ad30    17 FUNC    LOCAL  DEFAULT    6 do_qemu_init_pci_pwn_regi
+ 35555: 00000000012ac000   120 OBJECT  GLOBAL DEFAULT   27 pwn_bufs
+#+end_src
+
+At this point, I remembered a [[https://david942j.blogspot.com/2019/10/official-write-up-hitcon-ctf-quals-2019.html][writeup]] I'd read about a challenge from
+HITCON 2019 that featured a QEMU instance with a vulnerable custom
+device. In that writeup, the author describes writing a kernel driver
+to talk to the custom device, which almost had me going down that
+route. Fortunately, I discovered [[https://uaf.io/exploitation/2018/11/22/Hitb-2017-babyqemu.html][a writeup for a similar challenge]]
+that used [[https://www.kernel.org/doc/Documentation/filesystems/sysfs-pci.txt][sysfs-pci]] to perform memory-mapped I/O with the PCI device
+from a small userspace application.
+
+We can see the =pwn= device is in PCI bus 0, slot 05 in =lspci=:
+
+#+begin_src text
+# lspci -k
+00:01.0 Class 0601: 8086:7000
+00:04.0 Class 0200: 8086:100e
+00:00.0 Class 0600: 8086:1237
+00:01.3 Class 0680: 8086:7113
+00:03.0 Class 0200: 10ec:8139 8139cp
+00:01.1 Class 0101: 8086:7010 ata_piix
+00:02.0 Class 0300: 1234:1111 bochs-drm
+00:05.0 Class 00ff: 0003:1337 # <-- yup, that's the one
+#+end_src
+
+If we open the corresponding =sysfs= file and =mmap= it, we can hit the
+=pwn_mmio_{read,write}= routines by reading/writing the =mmap='d buffer
+in the guest:
+
+#+begin_src c
+int main(int argc, char *argv[])
+{
+  int fd = open("/sys/devices/pci0000:00/0000:00:05.0/resource0", O_RDWR | O_SYNC);
+  if (fd == -1)
+    die("open");
+  unsigned char *iomem = mmap(NULL, REGION_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  if (iomem == MAP_FAILED)
+    die("mmap");
+
+  // trigger pwn_mmio_read
+  iomem[0];
+
+  // trigger pwn_mmio_write
+  iomem[0] = 0xFF;
+
+  //...
+#+end_src
+
+Again, the source for QEMU v2.11.0 was helpful to figure out what
+API's the patched code is leveraging to create the PCI device. For
+example, the =REGION_SIZE= is a parameter passed to
+=memory_region_init_io= in the =pci_pwn_realize= function
+
+[[./img/pci_pwn_realize.png]]
+
+** =pwn= Device Vulnerability
+
+Looking at the =pwn_mmio_{read,write}= functions, we see that if the
+byte at offset 0x1c60 in the device instance is non-zero, then we can
+read from/write to arbitrary host addresses. I call this field =use_ptr=
+in the decompilation below. I appended =?= to field names because I was
+living with a lot of uncertainty at the time I reversed.
+
+In the decompilation of the =pwn_mmio_write= function, we see that the
+most-significant nibble of the 24 bit offset into the MMIO range for
+the device is significant, as is the state of the byte at 0x1c60. As I
+note in my annotation, we can set the byte at 0x1c60 by triggering the
+=snprintf= path.
+
+[[./img/pwn_mmio_write.png]]
+
+Note that the =pwn_fact_thread= is irrelevant to the challenge. It's
+probably just left over from using the [[https://github.com/qemu/qemu/blob/1b8c45899715d292398152ba97ef755ccaf84680/hw/misc/edu.c#L314][=edu= device]] in the QEMU source
+tree as a starting point for the =pwn= device.
+
+** Exploit
+
+Once we have the arbitrary read/write primitives down, [[./part2/exploit.c][the exploit
+code]] is pretty much the same as for the ARM VM: we stage the same
+reverse shell shellcode in a buffer in the host QEMU process (this
+time, I put it in the =PWNDevice= struct), call =mprotect= to make it
+executable, and jump to it.
+
+When we throw the exploit against the x86-64 challenge VM, we get a
+root shell and can =cat= the flag.
