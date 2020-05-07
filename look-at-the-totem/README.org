@@ -203,7 +203,7 @@ $ gdb ./qemu-system-arm
 $1 = (qemu_irq_handler *) 0x28
 #+end_src
 
-[[./part1/reverse_shell.nasm][My shellcode]] gave me a shell on the host.
+[[./common/reverse_shell.nasm][My shellcode]] gave me a shell on the host.
 
 ** Post-exploit
 When we get our reverse shell, we see we're running as a user named
