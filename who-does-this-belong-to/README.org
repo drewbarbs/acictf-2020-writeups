@@ -10,7 +10,7 @@ escalating privileges on the host via the =dius= compression utility
   =dius= binary while it is running set-uid =root=)
 - =race.c=: Exploit race condition in =dius= to cause it to extract
   =libw.so= to =/challenge/www/c=
-- =win.py=: Script to upload =libw.so= and =race= to target, when run the
+- =win.py=: Script to upload =libw.so= and =race= binaries to target, then run the
   sequence of commands to get the flag
 
 #+begin_src sh
